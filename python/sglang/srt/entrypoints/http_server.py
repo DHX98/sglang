@@ -28,6 +28,7 @@ import time
 from http import HTTPStatus
 from typing import Any, AsyncIterator, Callable, Dict, List, Optional, Union
 
+from python.sglang.Mylogger import MyLogger
 from sglang.srt.tracing.trace import process_tracing_init, trace_set_thread_info
 
 # Fix a bug of Python threading
@@ -527,9 +528,12 @@ async def set_internal_state(obj: SetInternalStateReq, request: Request):
     return res
 
 
+# Step6: FastAPI / OpenAI-style API 这边的 HTTP server。路由里其实就是调 TokenizerManager.generate_request()，然后把流式结果往外推。
 # fastapi implicitly converts json in the request to obj (dataclass)
 @app.api_route("/generate", methods=["POST", "PUT"])
 async def generate_request(obj: GenerateReqInput, request: Request):
+
+    MyLogger.banner("Step6: router to /generate")
     """Handle a generate request."""
     if obj.stream:
 

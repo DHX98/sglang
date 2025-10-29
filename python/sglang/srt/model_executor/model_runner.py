@@ -29,6 +29,7 @@ from typing import Callable, List, Optional, Tuple, Union
 import torch
 import torch.distributed as dist
 
+from python.sglang.Mylogger import MyLogger
 from sglang.srt.configs import FalconH1Config, NemotronHConfig, Qwen3NextConfig
 from sglang.srt.configs.device_config import DeviceConfig
 from sglang.srt.configs.load_config import LoadConfig, LoadFormat
@@ -459,10 +460,17 @@ class ModelRunner:
             server_args.max_total_tokens,
         )
         if self.device == "cuda":
+            MyLogger.banner(
+                "step1: (Cuda) ModelRunner = 真正和模型权重/显卡打交道的人，负责 forward()、sample()"
+            )
             self.init_cublas()
             self.init_attention_backend()
             self.init_device_graphs()
+        # step1: ModelRunner = 真正和模型权重/显卡打交道的人，负责 forward()、sample()
         elif self.device in ["npu", "cpu"]:
+            MyLogger.banner(
+                "step1: (Npu or Cpu) ModelRunner = 真正和模型权重/显卡打交道的人，负责 forward()、sample()"
+            )
             self.init_attention_backend()
             self.init_device_graphs()
         else:

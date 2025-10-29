@@ -34,6 +34,7 @@ from torch.cuda import Stream as CudaStream
 from torch.cuda import StreamContext as CudaStreamContext
 from torch.distributed import barrier
 
+from python.sglang import Mylogger
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.constrained.base_grammar_backend import (
     INVALID_GRAMMAR_OBJ,
@@ -306,7 +307,10 @@ class Scheduler(
             logger.info("Overlap scheduler is disabled for embedding models.")
 
         # Launch a tensor parallel worker
-
+        # Step3: Scheduler = 负责调度/批处理/并行策略，里面 new 一个 TpModelWorker，然后用它去真的跑推理
+        Mylogger.banner(
+            "Step3: Scheduler = 负责调度/批处理/并行策略，里面 new 一个 TpModelWorker，然后用它去真的跑推理"
+        )
         from sglang.srt.managers.tp_worker import TpModelWorker
 
         self.tp_worker = TpModelWorker(

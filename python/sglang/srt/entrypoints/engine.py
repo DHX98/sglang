@@ -31,6 +31,7 @@ from typing import AsyncIterator, Dict, Iterator, List, Optional, Tuple, Union
 
 import zmq
 
+from python.sglang.Mylogger import MyLogger
 from sglang.srt.tracing.trace import process_tracing_init, trace_set_thread_info
 
 # Fix a bug of Python threading
@@ -104,12 +105,15 @@ class Engine(EngineBase):
     2. Inter-process communication is done through IPC (each process uses a different port) via the ZMQ library.
     """
 
+    # Step5: Engine = 把 TokenizerManager + Scheduler（子进程）+ DetokenizerManager 全都拉起来，建立这些进程之间的 IPC（进程间通信）。
     def __init__(self, **kwargs):
         """
         The arguments of this function is the same as `sglang/srt/server_args.py::ServerArgs`.
         Please refer to `ServerArgs` for the documentation.
         """
-
+        MyLogger.banner(
+            "EngineInitialization, 把 TokenizerManager + Scheduler（子进程）+ DetokenizerManager 全都拉起来，建立这些进程之间的 IPC（进程间通信）"
+        )
         # Parse server_args
         if "server_args" in kwargs:
             # Directly load server_args

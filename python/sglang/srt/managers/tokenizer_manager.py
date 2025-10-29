@@ -39,6 +39,7 @@ import zmq
 import zmq.asyncio
 from fastapi import BackgroundTasks
 
+from python.sglang import Mylogger
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.disaggregation.utils import DisaggregationMode
 from sglang.srt.lora.lora_registry import LoRARegistry
@@ -144,6 +145,11 @@ class ReqState:
 
 class TokenizerManager(TokenizerCommunicatorMixin):
     """TokenizerManager is a process that tokenizes the text."""
+
+    # Step4: TokenizerManager = 收到用户请求后做 tokenizer、组 batch、通过 ZeroMQ 把请求丢给 Scheduler，然后收回增量结果做流式输出
+    Mylogger.banner(
+        "Step4: TokenizerManager = 收到用户请求后做 tokenizer、组 batch、通过 ZeroMQ 把请求丢给 Scheduler，然后收回增量结果做流式输出"
+    )
 
     def __init__(
         self,
