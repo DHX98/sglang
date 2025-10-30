@@ -31,7 +31,7 @@ from typing import AsyncIterator, Dict, Iterator, List, Optional, Tuple, Union
 
 import zmq
 
-from python.sglang.Mylogger import MyLogger
+from sglang.Mylogger import MyLogger
 from sglang.srt.tracing.trace import process_tracing_init, trace_set_thread_info
 
 # Fix a bug of Python threading

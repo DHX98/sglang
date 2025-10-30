@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Optional
 
 import torch
 
-from python.sglang import Mylogger
+from sglang.Mylogger import MyLogger
 from sglang.srt.configs.model_config import ModelConfig
 from sglang.srt.distributed import get_pp_group, get_world_group
 from sglang.srt.managers.io_struct import (
@@ -199,7 +199,7 @@ class TpModelWorker(BaseTpWorker):
     """A tensor parallel model worker."""
 
     # Step2: 把 ModelRunner包一层，提供给上层一个“模型 worker”的接口，比如 forward_batch_generation()
-    Mylogger.banner(
+    MyLogger.banner(
         "# Step2: 把 ModelRunner包一层，提供给上层一个“模型 worker”的接口，比如 forward_batch_generation()"
     )
 

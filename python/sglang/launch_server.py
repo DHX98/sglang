@@ -4,7 +4,7 @@ import asyncio
 import os
 import sys
 
-from python.sglang.Mylogger import MyLogger
+from sglang.Mylogger import MyLogger
 from sglang.srt.server_args import prepare_server_args
 from sglang.srt.utils import kill_process_tree
 
