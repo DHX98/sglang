@@ -646,6 +646,10 @@ class Scheduler(
         backend_sizes = {
             "flashinfer": ("SGLANG_FLASHINFER_PREFILL_SPLIT_TILE_SIZE", 4096),
             "triton": ("SGLANG_TRITON_PREFILL_TRUNCATION_ALIGN_SIZE", 4096),
+            "ascend": (
+                "SGLANG_ASCEND_PREFILL_TRUNCATION_ALIGN_SIZE",
+                4096,
+            ),
         }
         env_var, default_size = backend_sizes.get(
             self.server_args.attention_backend, (None, None)

@@ -78,6 +78,9 @@ class AscendAttnBackend(AttentionBackend):
         self.device = model_runner.device
         self.page_size = model_runner.page_size
         self.use_mla = model_runner.model_config.attention_arch == AttentionArch.MLA
+        self.enable_deterministic = getattr(
+            model_runner.server_args, "enable_deterministic_inference", False
+        )
         if self.use_mla:
             self.kv_lora_rank = model_runner.model_config.kv_lora_rank
             self.qk_rope_head_dim = model_runner.model_config.qk_rope_head_dim
@@ -351,20 +354,64 @@ class AscendAttnBackend(AttentionBackend):
                         dtype=query.dtype,
                         device=query.device,
                     )
+                    if self.enable_deterministic:
+                        # ---- deterministic：每个 request 单独调一次 kernel ----
+                        # CPU 侧长度信息
+                        extend_lens = forward_batch.extend_seq_lens_cpu  # List[int]
+                        seq_lens_cpu_int = self.forward_metadata.seq_lens_cpu_int
+                        extend_seq_lens_cpu_int = (
+                            self.forward_metadata.extend_seq_lens_cpu_int
+                        )
+                        block_tables = self.forward_metadata.block_tables
 
-                    torch_npu._npu_flash_attention_qlens(
-                        query=query,
-                        key_cache=k_cache,
-                        value_cache=v_cache,
-                        mask=self.mask,
-                        block_table=self.forward_metadata.block_tables,
-                        seq_len=self.forward_metadata.extend_seq_lens_cpu_int,
-                        context_lens=self.forward_metadata.seq_lens_cpu_int,
-                        scale_value=layer.scaling,
-                        num_heads=layer.tp_q_head_num,
-                        num_kv_heads=layer.tp_k_head_num,
-                        out=attn_output,
-                    )
+                        offset = 0
+                        for i, q_len in enumerate(extend_lens):
+                            if q_len == 0:
+                                continue
+
+                            # 这一条 request 对应的 query 切片
+                            q_slice = query[offset : offset + q_len]
+
+                            # 这两个 Tensor 形状都是 [1]
+                            seq_len_i = extend_seq_lens_cpu_int[i : i + 1]
+                            ctx_len_i = seq_lens_cpu_int[i : i + 1]
+
+                            # 这一条 request 需要的 page 数
+                            max_ctx = int(ctx_len_i.item())
+                            max_pages = (max_ctx + self.page_size - 1) // self.page_size
+                            block_table_i = block_tables[i : i + 1, :max_pages]
+
+                            out_slice = attn_output[offset : offset + q_len]
+
+                            torch_npu._npu_flash_attention_qlens(
+                                query=q_slice,
+                                key_cache=k_cache,
+                                value_cache=v_cache,
+                                mask=self.mask,
+                                block_table=block_table_i,
+                                seq_len=seq_len_i,
+                                context_lens=ctx_len_i,
+                                scale_value=layer.scaling,
+                                num_heads=layer.tp_q_head_num,
+                                num_kv_heads=layer.tp_k_head_num,
+                                out=out_slice,
+                            )
+
+                            offset += q_len
+                    else:
+                        torch_npu._npu_flash_attention_qlens(
+                            query=query,
+                            key_cache=k_cache,
+                            value_cache=v_cache,
+                            mask=self.mask,
+                            block_table=self.forward_metadata.block_tables,
+                            seq_len=self.forward_metadata.extend_seq_lens_cpu_int,
+                            context_lens=self.forward_metadata.seq_lens_cpu_int,
+                            scale_value=layer.scaling,
+                            num_heads=layer.tp_q_head_num,
+                            num_kv_heads=layer.tp_k_head_num,
+                            out=attn_output,
+                        )
                 else:
                     if layer.qk_head_dim != layer.v_head_dim:
                         attn_output = q.new_empty(
@@ -763,18 +810,44 @@ class AscendAttnBackend(AttentionBackend):
                     dtype=query.dtype,
                     device=query.device,
                 )
+                if self.enable_deterministic:
+                    # ---- deterministic：decode 也按 request 拆开 ----
+                    seq_lens_cpu_int = self.forward_metadata.seq_lens_cpu_int
+                    block_tables = self.forward_metadata.block_tables
 
-                torch_npu._npu_paged_attention(
-                    query=query,
-                    key_cache=k_cache,
-                    value_cache=v_cache,
-                    num_heads=layer.tp_q_head_num,
-                    num_kv_heads=layer.tp_k_head_num,
-                    scale_value=layer.scaling,
-                    block_table=self.forward_metadata.block_tables,
-                    context_lens=self.forward_metadata.seq_lens_cpu_int,
-                    out=attn_output,
-                )
+                    for i in range(num_tokens):
+                        q_i = query[i : i + 1]  # [1, H, D]
+                        ctx_i = seq_lens_cpu_int[i : i + 1]
+
+                        max_ctx = int(ctx_i.item())
+                        max_pages = (max_ctx + self.page_size - 1) // self.page_size
+                        block_i = block_tables[i : i + 1, :max_pages]
+
+                        out_i = attn_output[i : i + 1]
+
+                        torch_npu._npu_paged_attention(
+                            query=q_i,
+                            key_cache=k_cache,
+                            value_cache=v_cache,
+                            num_heads=layer.tp_q_head_num,
+                            num_kv_heads=layer.tp_k_head_num,
+                            scale_value=layer.scaling,
+                            block_table=block_i,
+                            context_lens=ctx_i,
+                            out=out_i,
+                        )
+                else:
+                    torch_npu._npu_paged_attention(
+                        query=query,
+                        key_cache=k_cache,
+                        value_cache=v_cache,
+                        num_heads=layer.tp_q_head_num,
+                        num_kv_heads=layer.tp_k_head_num,
+                        scale_value=layer.scaling,
+                        block_table=self.forward_metadata.block_tables,
+                        context_lens=self.forward_metadata.seq_lens_cpu_int,
+                        out=attn_output,
+                    )
             return attn_output.view(num_tokens, layer.tp_q_head_num * layer.v_head_dim)
         else:
             if save_kv_cache:
