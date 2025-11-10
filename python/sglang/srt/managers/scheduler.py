@@ -203,30 +203,6 @@ TEST_RETRACT_NO_PREFILL_BS = envs.SGLANG_TEST_RETRACT_NO_PREFILL_BS.get()
 GRAMMAR_TIMEOUT = float(os.environ.get("SGLANG_GRAMMAR_TIMEOUT", 300))
 
 
-def _det_debug_log_batch(self, batch: ScheduleBatch, tag: str = "batch"):
-    """调度层面的 batch layout 调试日志，受环境变量 SGLANG_NPU_DET_DEBUG 控制。"""
-    if os.getenv("SGLANG_NPU_DET_DEBUG", "0") != "1":
-        return
-
-    try:
-        mode = (
-            batch.forward_mode.name
-            if hasattr(batch.forward_mode, "name")
-            else str(batch.forward_mode)
-        )
-        rid_list = [req.rid for req in batch.reqs]
-        logger.info(
-            "[det-debug] %s forward_mode=%s batch_size=%d req_ids=%s",
-            tag,
-            mode,
-            len(rid_list),
-            rid_list,
-        )
-    except Exception:
-        # 任何 debug 失败都不能影响正常调度
-        pass
-
-
 @dataclass
 class EmbeddingBatchResult:
     embeddings: torch.Tensor
@@ -244,6 +220,29 @@ class Scheduler(
     SchedulerPPMixin,
 ):
     """A scheduler that manages a tensor parallel GPU worker."""
+
+    def _det_debug_log_batch(self, batch: ScheduleBatch, tag: str = "batch"):
+        """调度层面的 batch layout 调试日志，受环境变量 SGLANG_NPU_DET_DEBUG 控制。"""
+        if os.getenv("SGLANG_NPU_DET_DEBUG", "0") != "1":
+            return
+
+        try:
+            mode = (
+                batch.forward_mode.name
+                if hasattr(batch.forward_mode, "name")
+                else str(batch.forward_mode)
+            )
+            rid_list = [req.rid for req in batch.reqs]
+            logger.info(
+                "[det-debug] %s forward_mode=%s batch_size=%d req_ids=%s",
+                tag,
+                mode,
+                len(rid_list),
+                rid_list,
+            )
+        except Exception:
+            # 任何 debug 失败都不能影响正常调度
+            pass
 
     def __init__(
         self,
@@ -535,6 +534,9 @@ class Scheduler(
         # Init metrics stats
         self.init_metrics(tp_rank, pp_rank, dp_rank)
 
+        # Init the det counter
+        self._det_enq_counter = 0
+
         if self.enable_kv_cache_events:
             self.init_kv_events(server_args.kv_events_config)
 
@@ -591,6 +593,16 @@ class Scheduler(
                 (GetLoadReqInput, self.get_load),
             ]
         )
+
+    def _tag_req_with_det_order(self, req):
+        """Attach a deterministic enqueue sequence number to the request.
+
+        This makes FCFS stable across runs when enable_deterministic_inference is on.
+        """
+        if self.server_args.enable_deterministic_inference:
+            # 以 scheduler 线程内的单调计数作为入队顺序的严格定义
+            req._det_enq_seq = self._det_enq_counter
+            self._det_enq_counter += 1
 
     def init_sockets(self, server_args: ServerArgs, port_args: PortArgs):
         context = zmq.Context(2)
@@ -1303,6 +1315,8 @@ class Scheduler(
                     f"Invalid request: session id {recv_req.session_params.id} does not exist"
                 )
                 self.init_req_max_new_tokens(req)
+                # 先排序再入队zmq
+                self._tag_req_with_det_order(req)
                 self._add_request_to_queue(req)
                 return
         else:
@@ -1311,6 +1325,8 @@ class Scheduler(
             req = session.create_req(recv_req, self.tokenizer)
             if isinstance(req.finished_reason, FINISH_ABORT):
                 self.init_req_max_new_tokens(req)
+                # 先排序再入队zmq
+                self._tag_req_with_det_order(req)
                 self._add_request_to_queue(req)
                 return
 
@@ -1333,6 +1349,8 @@ class Scheduler(
                     )
                 )
                 self.init_req_max_new_tokens(req)
+                # 先排序再入队zmq
+                self._tag_req_with_det_order(req)
                 self._add_request_to_queue(req)
                 return
 
@@ -1347,6 +1365,8 @@ class Scheduler(
         )
         if error_msg:
             req.set_finish_with_abort(error_msg)
+            # 先排序再入队zmq
+            self._tag_req_with_det_order(req)
             self._add_request_to_queue(req)
             return
 
@@ -1369,6 +1389,8 @@ class Scheduler(
             error_msg = f"{req.logprob_start_len=} is higher than the number of input tokens {len(req.origin_input_ids)=}. Please use a smaller logprob_start_len."
             req.logprob_start_len = len(req.origin_input_ids) - 1
             req.set_finish_with_abort(error_msg)
+            # 先排序再入队zmq
+            self._tag_req_with_det_order(req)
             self._add_request_to_queue(req)
             return
 
@@ -1407,6 +1429,8 @@ class Scheduler(
         if add_to_grammar_queue:
             self.grammar_queue.append(req)
         else:
+            # 先排序再入队zmq
+            self._tag_req_with_det_order(req)
             self._add_request_to_queue(req)
 
     def handle_batch_generate_request(
@@ -1565,6 +1589,8 @@ class Scheduler(
                         f"After expanding {len(req.origin_input_ids_unpadded)=} => {len(req.origin_input_ids)} >= {self.max_req_input_len}."
                     )
                 )
+                # 先排序再入队zmq
+                self._tag_req_with_det_order(req)
                 self._add_request_to_queue(req)
                 return
 
@@ -1575,11 +1601,15 @@ class Scheduler(
             self.server_args.allow_auto_truncate,
         )
         if error_msg:
+            # 先排序再入队zmq
+            self._tag_req_with_det_order(req)
             self._add_request_to_queue(req)
             return
 
         # Copy more attributes
         req.logprob_start_len = len(req.origin_input_ids) - 1
+        # 先排序再入队zmq
+        self._tag_req_with_det_order(req)
         self._add_request_to_queue(req)
 
     def handle_batch_embedding_request(
@@ -1768,6 +1798,14 @@ class Scheduler(
         if self.enable_hierarchical_cache:
             self.tree_cache.check_hicache_events()
 
+        # 在确定性推理模式下，把 FCFS 等价成“按入队序号稳定排序”
+        if (
+            self.server_args.enable_deterministic_inference
+            and self.schedule_policy == "fcfs"
+        ):
+            # Python 的 list.sort 是稳定排序；如果不存在 _det_enq_seq（旧 req 或容错），默认 0
+            self.waiting_queue.sort(key=lambda r: getattr(r, "_det_enq_seq", 0))
+
         # Get priority queue
         self.policy.calc_priority(self.waiting_queue)
 
@@ -1862,6 +1900,8 @@ class Scheduler(
         ]
         if adder.preempt_list:
             for req in adder.preempt_list:
+                # 先排序再入队zmq
+                self._tag_req_with_det_order(req)
                 self._add_request_to_queue(req)
 
         if adder.new_chunked_req is not None:
@@ -1955,6 +1995,8 @@ class Scheduler(
             )
 
             for req in retracted_reqs:
+                # 先排序再入队zmq
+                self._tag_req_with_det_order(req)
                 self._add_request_to_queue(req, is_retracted=True)
         else:
             self.new_token_ratio = max(
@@ -2342,6 +2384,8 @@ class Scheduler(
         num_ready_reqs = num_ready_reqs_max + num_timeout_reqs_max
 
         for req in self.grammar_queue[:num_ready_reqs]:
+            # 先排序再入队zmq
+            self._tag_req_with_det_order(req)
             self._add_request_to_queue(req)
         self.grammar_queue = self.grammar_queue[num_ready_reqs:]
 
