@@ -203,6 +203,30 @@ TEST_RETRACT_NO_PREFILL_BS = envs.SGLANG_TEST_RETRACT_NO_PREFILL_BS.get()
 GRAMMAR_TIMEOUT = float(os.environ.get("SGLANG_GRAMMAR_TIMEOUT", 300))
 
 
+def _det_debug_log_batch(self, batch: ScheduleBatch, tag: str = "batch"):
+    """调度层面的 batch layout 调试日志，受环境变量 SGLANG_NPU_DET_DEBUG 控制。"""
+    if os.getenv("SGLANG_NPU_DET_DEBUG", "0") != "1":
+        return
+
+    try:
+        mode = (
+            batch.forward_mode.name
+            if hasattr(batch.forward_mode, "name")
+            else str(batch.forward_mode)
+        )
+        rid_list = [req.rid for req in batch.reqs]
+        logger.info(
+            "[det-debug] %s forward_mode=%s batch_size=%d req_ids=%s",
+            tag,
+            mode,
+            len(rid_list),
+            rid_list,
+        )
+    except Exception:
+        # 任何 debug 失败都不能影响正常调度
+        pass
+
+
 @dataclass
 class EmbeddingBatchResult:
     embeddings: torch.Tensor
@@ -1695,6 +1719,12 @@ class Scheduler(
             ret = self.prepare_mlp_sync_batch(ret)
 
         if ret:
+            # Step B: 在这里打出本轮要运行的 batch 布局
+            # 如果只想看 decode，可以加一个 forward_mode 判断：
+            # if ret.forward_mode.is_decode():
+            #     self._det_debug_log_batch(ret, tag="scheduler_decode_batch")
+            self._det_debug_log_batch(ret, tag="scheduler_next_batch")
+
             attrs = {"bid": hex(id(ret)), "batch_size": ret.batch_size()}
             trace_event_batch("schedule", ret.reqs, attrs=attrs)
 

@@ -1,5 +1,7 @@
 # Adapted from qwen2.py
+import hashlib
 import logging
+import os
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import torch
@@ -38,6 +40,26 @@ from sglang.srt.utils import (
     wait_cmo_stream,
 )
 
+
+def _det_debug_hash(tag: str, t: torch.Tensor):
+    """用于定位不确定性的辅助 hash 日志，受 env 开关控制。"""
+    if os.getenv("SGLANG_NPU_DET_DEBUG", "0") != "1":
+        return
+
+    if t is None or t.numel() == 0:
+        h = "EMPTY"
+        shape = None if t is None else tuple(t.shape)
+    else:
+        with torch.no_grad():
+            x = t.detach().to("cpu").float().reshape(-1)
+            # 采样前 1024 个元素，避免太慢
+            x = x[:1024]
+            h = hashlib.sha256(x.numpy().tobytes()).hexdigest()[:8]
+            shape = tuple(t.shape)
+
+    logger.info(f"[det-debug] {tag} shape={shape} hash={h}")
+
+
 Qwen3Config = None
 
 logger = logging.getLogger(__name__)
@@ -63,6 +85,11 @@ class Qwen3Attention(nn.Module):
         alt_stream: Optional[torch.cuda.Stream] = None,
     ) -> None:
         super().__init__()
+
+        # 记录 layer_id + debug flag
+        self.layer_id = layer_id
+        self._det_debug = os.getenv("SGLANG_NPU_DET_DEBUG", "0") == "1"
+
         self.hidden_size = hidden_size
         self.tp_size = get_tensor_model_parallel_world_size()
         self.total_num_heads = num_heads
@@ -178,8 +205,28 @@ class Qwen3Attention(nn.Module):
         if get_global_server_args().rl_on_policy_target == "fsdp":
             q = q.to(torch.bfloat16)
             k = k.to(torch.bfloat16)
-
+        # --- Step A1: 记录进入 attention 之前的状态 ---
+        if self._det_debug:
+            try:
+                _det_debug_hash(
+                    f"#### layer={self.layer_id}/mode={forward_batch.forward_mode.name}/q_before ####",
+                    q,
+                )
+            except Exception:
+                # debug 工具不能影响正常推理
+                pass
         attn_output = self.attn(q, k, v, forward_batch)
+
+        # --- Step A2: 记录 attention 输出 ---
+        if self._det_debug:
+            try:
+                _det_debug_hash(
+                    f"#### layer=={self.layer_id}/mode={forward_batch.forward_mode.name}/attn_out ####",
+                    attn_output,
+                )
+            except Exception:
+                pass
+
         output, _ = self.o_proj(attn_output)
         return output
 
@@ -401,6 +448,16 @@ class Qwen3ForCausalLM(nn.Module):
             hidden_states, aux_hidden_states = hidden_states
 
         if self.pp_group.is_last_rank:
+            # --- Step A3: 记录 logits 之前的 hidden_states ---
+            if os.getenv("SGLANG_NPU_DET_DEBUG", "0") == "1":
+                try:
+                    _det_debug_hash(
+                        f"lm_hidden/mode={forward_batch.forward_mode.name}",
+                        hidden_states,
+                    )
+                except Exception:
+                    pass
+
             if not get_embedding:
                 return self.logits_processor(
                     input_ids,
